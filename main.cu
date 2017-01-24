@@ -139,8 +139,6 @@ int max_complex = 4;  // number of walls that a particle can hit at a time
 //file names for IO
 char *in_fname = NULL;
 char dir_name[256] = "\0./";
-int collides[2];
-int collider[2];
 
 //dynamical variables
 float3 *p_CPU, *p_GPU; // position
@@ -176,6 +174,7 @@ int *how_many_w_CPU, *how_many_w_GPU;
 int complex_colliders;
 int * complex_event_particle;
 int * complex_event_log;
+float dt_step = 0.0;
 
 
 
@@ -536,7 +535,7 @@ void set_initial_conditions()
 	w_collisions_heated	= (float* )malloc(		N * sizeof(float ) );
 	w_collisions_passive	= (float* )malloc(		N * sizeof(float ) );
 	complex_event_particle 	= (int*   )malloc(		N * sizeof(int   ) );
-	complex_event_log 	= (int*   )malloc(		N * sizeof(int   ) );
+	complex_event_log 	= (int*   )malloc(2 *		N * sizeof(int   ) );
 
 	// GPU MEMORY ALLOCATION
 	block.x = 512;
@@ -910,6 +909,7 @@ void errorCheck(int num, const char * message)
 void add_recursively_to_complex_event_particles(int p, int ignored_val)
 {
 	bool not_included_yet = true;
+	int num_p = 0, num_w = 0;
 	if(p != ignored_val)
 	{
 		for(int i = 0; i < complex_colliders; i++)
@@ -920,21 +920,31 @@ void add_recursively_to_complex_event_particles(int p, int ignored_val)
 			complex_event_particle[complex_colliders] = p;
 			complex_colliders++;
 		}
-		for(int i = 0; i < how_many_p_CPU[p]; i++)
-			add_recursively_to_complex_event_particles(what_p_CPU[max_complex*p+i], ignored_val);
-		complex_event_log[complex_colliders] = how_many_p_CPU[p];
+		num_p = how_many_p_CPU[p];
+		num_w = how_many_w_CPU[p];
 		how_many_p_CPU[p] = how_many_w_CPU[p] = 0;
+		for(int i = 0; i < num_p; i++)
+			add_recursively_to_complex_event_particles(what_p_CPU[max_complex*p+i], ignored_val);
+
+		complex_event_log[2*complex_colliders  ] = num_p;
+		complex_event_log[2*complex_colliders+1] = num_w;
 	}
 }
 
-bool detect_complex_collision_events()
+bool detect_collision_events()
 {
 	bool anything_complex_found = false;
 	int i, j, k;
 
+	//find global min dt
+	dt_step = dt_CPU[0];
+	for (i = 1; i < N; i++) if(dt_CPU[i] <= dt_step) dt_step = dt_CPU[i];
+
 	complex_colliders = 0;
 	for(i = 0; i < N; i++)
 	{
+		if(dt_CPU[i] > dt_step) how_many_p_CPU[i] = how_many_w_CPU[i] = 0;
+
 		if(how_many_p_CPU[i] > 1)
 		{
 			add_recursively_to_complex_event_particles(i, -2);
@@ -948,7 +958,6 @@ bool detect_complex_collision_events()
 				add_recursively_to_complex_event_particles(k, i);
 			}
 			anything_complex_found = true;
-
 		}
 	}
 	return anything_complex_found;
@@ -988,7 +997,10 @@ void randomize_position(int p)
 		{
 			dd = dot(p_CPU[i] - new_pos, p_CPU[i] - new_pos);
 			if(dd < (radius_CPU[i] + radius_CPU[p]) * (radius_CPU[i] + radius_CPU[p]) )
+			{
 				needs_new_position = true;
+				i = N;
+			}
 		}
 	}
 	p_CPU[p] = new_pos;
@@ -996,7 +1008,6 @@ void randomize_position(int p)
 
 void n_body()
 {
-	float dt_step = 0.0;
 
 	FILE * out_file;
 	FILE * complex_event_log_file;
@@ -1050,11 +1061,9 @@ void n_body()
 		cudaMemcpy(     what_w_CPU,     what_w_GPU,max_complex* N * sizeof(int  ), cudaMemcpyDeviceToHost);
 		cudaMemcpy(         dt_CPU,         dt_GPU,             N * sizeof(float), cudaMemcpyDeviceToHost);
 
-		//find global min dt
-		dt_step = dt_CPU[0];
-		for (i = 1; i < N; i++) if(dt_CPU[i] <= dt_step) dt_step = dt_CPU[i];
-		t_tot += dt_step;
-		for (i = 1; i < N; i++) if(dt_CPU[i] > dt_step) how_many_p_CPU[i] = how_many_w_CPU[i] = 0;
+
+		// check (and modify tags) if complex collision events occurred
+		complex_collisions_occurred = detect_collision_events();
 
 		// if no collisions were detected, we are done. 
 		if(dt_step < 0.0)
@@ -1062,9 +1071,7 @@ void n_body()
 			printf("\nEarly exit : dt_step = %f < 0 at step %i\n", dt_step, step);
 			exit(1);
 		}
-
-		// check (and modify tags) if complex collision events occurred
-		complex_collisions_occurred = detect_complex_collision_events();
+		t_tot += dt_step;
 
 		// update all particles to new time step
 		for(i = 0; i < N; i++)
@@ -1114,15 +1121,15 @@ void n_body()
 			fprintf(complex_event_log_file, "\n");
 		}
 		//compute smart_stop_condition
-		if(smart_stop_found == 0)
-		{
-			//if(abs(pressure.window_sd / pressure.window_mean) < 0.00001)
-			if(t_tot > 20)
-			{
-				smart_stop_found = 1;
-				smart_max_steps = step;
-			}
-		}	
+		//if(smart_stop_found == 0)
+		//{
+		//	//if(abs(pressure.window_sd / pressure.window_mean) < 0.00001)
+		//	if(t_tot > 20)
+		//	{
+		//		smart_stop_found = 1;
+		//		smart_max_steps = step;
+		//	}
+		//}	
 
 		
 		// update position on GPU to new time step
