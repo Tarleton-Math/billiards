@@ -166,16 +166,12 @@ class Wall {
 		float max_cube_dim = MAX_CUBE_DIM;
 	public: 
 		int type; // heated, passive, sliding, or circles
-
 		float2 endpoints[2]; // if a 2D line segment
-
-		float3 position; // center if a circle type wall
+		float3 position; // center if a circle type wall or position if plane in 3d
 		float  radius; // radius if a circle type wall
-
 		float3 normal; // normal vector (assume not a circle at the moment)
 		float3 tangent1;
 		float3 tangent2;
-
 		float wall_temp[2]; // temperature 
 		float alpha; // probability a wall is thermally active
 	Wall()
@@ -184,65 +180,65 @@ class Wall {
 		D = DIMENSION;
 	}
 
+	// returns 0 or 1 whether a particle (p) collides with the wall (0=no collision)
+	// and stores the time until collision in float &time parameter. 
 	CUDA_CALLABLE_MEMBER int time_to_collision(float3 p, float3 v, float r, float * time)
 	{
 		int collides = 0;
-		if(D > 2)
+		if(type != circles) 
 		{
-			float tt, max_cube_minus_radius;
-			max_cube_minus_radius = max_cube_dim - r;
-			tt = -2;
-
-			if( (normal.x > 0.5) && (v.x * v.x > 0.0) )
+			if(D > 2)
 			{
-				tt = ( (-max_cube_minus_radius) - p.x ) / v.x;
+				float tt, max_cube_minus_radius;
+				max_cube_minus_radius = max_cube_dim - r;
+				tt = -2;
+				if( (normal.x > 0.5) && (v.x * v.x > 0.0) )
+				{
+					tt = ( (-max_cube_minus_radius) - p.x ) / v.x;
+				}
+				else if( (normal.y > 0.5) && (v.y * v.y > 0.0) )
+				{
+					tt = ( (-max_cube_minus_radius) - p.y ) / v.y;
+				}
+				else if( (normal.z > 0.5) && v.z * v.z > 0.0)  
+				{
+					tt = ( (-max_cube_minus_radius) - p.z ) / v.z;
+				}
+				else if( (normal.x < -0.5) && (v.x * v.x > 0.0) )
+				{
+					tt = ( max_cube_minus_radius - p.x ) / v.x;
+				}
+				else if( (normal.y < -0.5) && (v.y * v.y > 0.0) )
+				{
+					tt = ( max_cube_minus_radius - p.y ) / v.y;
+				}
+				else if( (normal.z < -0.5) && (v.z * v.z > 0.0) )
+				{
+					tt = ( max_cube_minus_radius - p.z ) / v.z;
+				}
+				if( tt >= 0.0)
+				{
+				  	(*time) = tt;
+					collides = 1;
+				}
 			}
-			else if( (normal.y > 0.5) && (v.y * v.y > 0.0) )
-			{
-				tt = ( (-max_cube_minus_radius) - p.y ) / v.y;
-			}
-			else if( (normal.z > 0.5) && v.z * v.z > 0.0)  
-			{
-				tt = ( (-max_cube_minus_radius) - p.z ) / v.z;
-			}
-			else if( (normal.x < -0.5) && (v.x * v.x > 0.0) )
-			{
-				tt = ( max_cube_minus_radius - p.x ) / v.x;
-			}
-			else if( (normal.y < -0.5) && (v.y * v.y > 0.0) )
-			{
-				tt = ( max_cube_minus_radius - p.y ) / v.y;
-			}
-			else if( (normal.z < -0.5) && (v.z * v.z > 0.0) )
-			{
-				tt = ( max_cube_minus_radius - p.z ) / v.z;
-			}
-			if( tt >= 0.0)
-			{
-			  	(*time) = tt;
-				collides = 1;
-			}
-		}
-		else
-		{
-			if(type != circles)
+			else
 			{
 				float B1,B2,A11,A12,A21,A22,D,t1,t2;
 				B1 = p.x + r - endpoints[0].x;
 				B2 = p.y + r - endpoints[0].y;
 
 				A11 = (endpoints[1].x - endpoints[0].x);
-				A12 = v.x;
+				A12 = -v.x;
 				A21 = (endpoints[1].y - endpoints[0].y);
-				A22 = v.y;
+				A22 = -v.y;
 
 				D = A11 * A22 - (A21 * A12);
 
-				t1 = A22 * B1 - A12 * B2;
-				t2 = A11 * B2 - A21 * B1;
 				if( abs(D) > 0 )
 				{
-					t1 /= D; t2 /= D;
+					t1 = (A22*B1 - A12*B2) / D;
+					t2 = (A11*B2 - A21*B1) / D;
 					// if they cross at a point in the range of the line segment
 					if( (t1 >= 0.0) && (t1 <= 1.0) && (t2 >= 0.0))
 					{
@@ -251,51 +247,56 @@ class Wall {
 					}
 				}
 			}
-			else
-			{
-
-			}
+		}
+		else
+		{
+			// check circle - vector collision (see GPU code)
 		}
 		return collides;
 
 	}
-	float temperature(float3 pos)
-	{
-		float t;
-		if( (endpoints[1].x - endpoints[0].x)*(endpoints[1].x - endpoints[0].x) > 0)
-			t = (pos.x - endpoints[0].x) / (endpoints[1].x - endpoints[0].x);
-		else
-			t = (pos.y - endpoints[0].y) / (endpoints[1].y - endpoints[0].y);
-		return (wall_temp[0] + t*(wall_temp[1] - wall_temp[0]));
-	}
+
+	// resolves outgoing particle velocity after collision
 	float3 resolve_collision(int p, float3 v)
 	{
 		float3 v_out;
-		if(DIMENSION > 2)
+		if(type == heated)
 		{
-			if(type == heated)
+			float sigma, u, sn, st1, st2, T, m;
+
+			if(DIMENSION > 2)
 			{
-				float3 position = make_float3(0,0,0);
-				float u, sn, st1, st2, T, m;
-				T = wall_temp[0];//temperature(position);
+				T = wall_temp[0];
 				m = mass_CPU[p];
-				float sigma = sqrt(BOLTZ_CONST * T / m);
+				sigma = sqrt(BOLTZ_CONST * T / m);
 
 				u = unif_dist(generator);
 				sn = sigma * sqrt(fabs(2.0 * log(1.0 - u)));
 				st1 = norm_dist(generator)*sigma;
 				st2 = norm_dist(generator)*sigma;
-
 				v_out = sn*normal + st1*tangent1 + st2*tangent2;
-			}
-			else if(type == passive)
-			{
-				v_out = v - (2.0 * dot(normal, v) * normal);
 			}
 			else
 			{
+				T = wall_temp[0];
+				m = mass_CPU[p];
+				sigma = sqrt(BOLTZ_CONST*T/m);
+				u = unif_dist(generator);
+				sn = sigma * sqrt(fabs(2.0*log(1.0-u)));
+				st1 = norm_dist(generator)*sigma;
 
+				v_out.x = sn*normal.x + st1 * tangent1.x;
+				v_out.y = sn*normal.y + st1 * tangent1.y;
+				v_out.z = 0.0;
 			}
+		}
+		else if(type == passive)
+		{
+			v_out = v - (2.0 * dot(normal, v) * normal);
+		}
+		else if(type == circles)
+		{
+
 		}
 		return v_out;
 	}
@@ -422,30 +423,8 @@ void make_orthonormal_frame(float3 * n, float3 * t1, float3 * t2)
 
 void allocate_wall_memory()
 {
-	int i;
-	if(DIMENSION > 2)
-	{
-		walls_CPU = (Wall*)malloc(6*sizeof(Wall));
-
-		for(i = 0; i < 6; i++) walls_CPU[i] = Wall();
-
-		//normal vectors to walls 
-		walls_CPU[0].normal.x = 1.0; walls_CPU[0].normal.y = 0.0; walls_CPU[0].normal.z = 0.0;
-		walls_CPU[2].normal.x = 0.0; walls_CPU[2].normal.y = 1.0; walls_CPU[2].normal.z = 0.0;
-		walls_CPU[4].normal.x = 0.0; walls_CPU[4].normal.y = 0.0; walls_CPU[4].normal.z = 1.0;
-		walls_CPU[1].normal.x =-1.0; walls_CPU[1].normal.y = 0.0; walls_CPU[1].normal.z = 0.0;
-		walls_CPU[3].normal.x = 0.0; walls_CPU[3].normal.y =-1.0; walls_CPU[3].normal.z = 0.0;
-		walls_CPU[5].normal.x = 0.0; walls_CPU[5].normal.y = 0.0; walls_CPU[5].normal.z =-1.0;
-
-		for(i = 0; i < 6; i++)
-		{
-			walls_CPU[i].type=passive;
-			make_orthonormal_frame(&(walls_CPU[i].normal), &(walls_CPU[i].tangent1), &(walls_CPU[i].tangent2));
-		}
-	}
-	else
-	{
-	}
+	walls_CPU = (Wall*)malloc(num_walls * sizeof(Wall));
+	for(int i = 0; i < num_walls; i++) walls_CPU[i] = Wall();
 }
 
 void setup_walls()
@@ -472,16 +451,29 @@ void read_input_file()
 	const int bdim = 132;
 	char buff[bdim];
 	int i, d;
-	double f, g, f1, g1,t1,t2;
+	double f, g, h, f1, g1, h1, t1, t2;
 	char s[256];
-	float3 n;
 
 	if( (fp = fopen(in_fname,"r")) == NULL)
 	{
 		printf("No input file. Using default values.\n");
 		num_walls = 6;
 		allocate_wall_memory();
-		setup_walls();
+
+		walls_CPU[0].normal.x = 1.0; walls_CPU[0].normal.y = 0.0; walls_CPU[0].normal.z = 0.0;
+		walls_CPU[2].normal.x = 0.0; walls_CPU[2].normal.y = 1.0; walls_CPU[2].normal.z = 0.0;
+		walls_CPU[4].normal.x = 0.0; walls_CPU[4].normal.y = 0.0; walls_CPU[4].normal.z = 1.0;
+		walls_CPU[1].normal.x =-1.0; walls_CPU[1].normal.y = 0.0; walls_CPU[1].normal.z = 0.0;
+		walls_CPU[3].normal.x = 0.0; walls_CPU[3].normal.y =-1.0; walls_CPU[3].normal.z = 0.0;
+		walls_CPU[5].normal.x = 0.0; walls_CPU[5].normal.y = 0.0; walls_CPU[5].normal.z =-1.0;
+
+		for(i = 0; i < 6; i++)
+		{
+			walls_CPU[i].type=passive;
+			make_orthonormal_frame(&(walls_CPU[i].normal), &(walls_CPU[i].tangent1), &(walls_CPU[i].tangent2));
+			walls_CPU[i].position = -MAX_CUBE_DIM * (walls_CPU[i].normal);
+		}
+
 	}
 	else
 	{
@@ -510,55 +502,52 @@ void read_input_file()
 		fgets(buff,bdim,fp);
 		fgets(buff,bdim,fp);
 		sscanf(buff, "%d", &d);
-		packing_scheme = d;
-
-		fgets(buff,bdim,fp);
-		fgets(buff,bdim,fp);
-		sscanf(buff, "%d", &d);
 		MAX_STEPS = d;
-		if(DIMENSION < 3)
-		{
-			fgets(buff, bdim, fp);
-			fgets(buff, bdim, fp);
-			sscanf(buff, "%d", &num_walls);
-			allocate_wall_memory();
-			for(i = 0; i < num_walls; i++)
-			{
-				fgets(buff, bdim, fp);
-				sscanf(buff, "%d %lf %lf %lf %lf %lf %lf",&d,&t1,&t2,&f,&g,&f1,&g1);
-				walls_CPU[i].type = d;
-				walls_CPU[i].wall_temp[0] = t1;
-				walls_CPU[i].wall_temp[1] = t2;
-				walls_CPU[i].endpoints[0].x = f;
-				walls_CPU[i].endpoints[0].y = g;
-				walls_CPU[i].endpoints[1].x = f1;
-				walls_CPU[i].endpoints[1].y = g1;
-				n.x = g1-g;
-				n.y = f-f1;
-				n.z = 0.0;
-				walls_CPU[i].normal = normalize(n);
-				make_orthonormal_frame(&(walls_CPU[i].normal), &(walls_CPU[i].tangent1), &(walls_CPU[i].tangent2));
-			}
-		}
-		else
-		{
-			num_walls = 6;
-			allocate_wall_memory();
-			fgets(buff, bdim, fp);
-			for(i = 0; i < 6; i++)
-			{
-				fgets(buff, bdim, fp);
-				sscanf(buff, "%d %lf %lf", &d, &f, &g);
-				walls_CPU[i].type = d;
-				walls_CPU[i].wall_temp[0] = f;
-				walls_CPU[i].wall_temp[1] = g;
-			}
-			setup_walls();
-		}
+
 		fgets(buff, bdim, fp);
 		fgets(buff, bdim, fp);
-		sscanf(buff,"%d", &d);
-		track_large_particle = d;
+		sscanf(buff, "%d", &num_walls);
+		allocate_wall_memory();
+
+		fgets(buff, bdim, fp);
+		for(i = 0; i < num_walls; i++)
+		{
+			fgets(buff, bdim, fp);
+			sscanf(buff, "%d %lf %lf %lf %lf %lf %lf %lf %lf",&d,&t1,&t2,&f,&g,&h,&f1,&g1,&h1);
+
+			walls_CPU[i].wall_temp[0] = t1;
+			walls_CPU[i].wall_temp[1] = t2;
+
+			walls_CPU[i].type = d;
+
+			if(d != circles)
+			{
+				if(DIMENSION < 3)
+				{
+					walls_CPU[i].endpoints[0].x = f;
+					walls_CPU[i].endpoints[0].y = g;
+					walls_CPU[i].endpoints[1].x = f1;
+					walls_CPU[i].endpoints[1].y = g1;
+					// inward pointing normals assumes that the walls are given in clockwise orientation. 
+					walls_CPU[i].normal = normalize(make_float3((g1-g),(f-f1),0.0));
+					walls_CPU[i].tangent1 = normalize(make_float3((f-f1),(g-g1),0.0));
+					walls_CPU[i].tangent2 = make_float3(0.0,0.0,0.0);
+				}
+				else
+				{
+					walls_CPU[i].position = make_float3(f1,g1,h1);
+					walls_CPU[i].normal = normalize(make_float3(f,g,h));
+					make_orthonormal_frame(&(walls_CPU[i].normal), 
+								&(walls_CPU[i].tangent1), 
+								&(walls_CPU[i].tangent2));
+				}
+			}
+			else
+			{
+				walls_CPU[i].position = make_float3(f,g,h);
+				walls_CPU[i].radius = f1;
+			}
+		}
 
 		fgets(buff, bdim, fp);
 		fgets(buff, bdim, fp);
@@ -681,7 +670,8 @@ void pack_particles()
 
 		v_CPU[i].x = norm_dist(generator)*T;
 		v_CPU[i].y = norm_dist(generator)*T;
-		v_CPU[i].z = norm_dist(generator)*T;
+		if(DIMENSION > 2) v_CPU[i].z = norm_dist(generator)*T;
+		else v_CPU[i].z = 0.0;
 	}
 }
 
@@ -1066,6 +1056,25 @@ void check_no_particles_escape(int time_step, float total_time)
 	}
 }
 
+void print_output_file(FILE *fp, int i, int j, float time, float3 collision_normal)
+{
+	if(DIMENSION > 2)
+	{
+		fprintf(fp, "c, %d, %d, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf %lf\n", 
+			i, j, time, 
+			p_CPU[i].x, p_CPU[i].y, p_CPU[i].z, 
+			0.0, 0.0, 0.0,
+			v_CPU[i].x, v_CPU[i].y, v_CPU[i].z,
+			collision_normal.x, collision_normal.y, collision_normal.z, 
+			pressure.latest_value, gas_temperature.latest_value, heat_sum, entropy_sum
+		);
+	}
+	else
+	{
+
+	}
+}
+
 void n_body()
 {
 
@@ -1092,17 +1101,7 @@ void n_body()
 	{
 		fprintf(out_file, "r, %d, %lf, %lf\n", i, radius_CPU[i], mass_CPU[i]);
 	}
-	for(i = 0; i < N; i++)
-	{
-		fprintf(out_file, "c, %d, %d, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf %lf\n", 
-					i, 0, t_tot, 
-					p_CPU[i].x, p_CPU[i].y, p_CPU[i].z, 
-					0.0, 0.0, 0.0,
-					v_CPU[i].x, v_CPU[i].y, v_CPU[i].z,
-					collision_normal.x, collision_normal.y, collision_normal.z, 
-					0.0, 0.0, 0.0, 0.0
-			);
-	}
+	for(i = 0; i < N; i++) print_output_file(out_file, i, 0, t_tot, collision_normal);
 
 	step = 0;
 	smart_max_steps = MAX_STEPS;
@@ -1146,47 +1145,22 @@ void n_body()
 				{
 					w = -(1 + what_w_CPU[max_complex * i + j]);
 					v_out = walls_CPU[w].resolve_collision(i, v_in);
-/*
-					if(walls_CPU[w].type == heated)
-					{
-						v_out = heated_wall_reflection(v_in, walls_CPU[w].normal, walls_CPU[w].tangent1, walls_CPU[w].tangent2, walls_CPU[w].wall_temp[0], mass_CPU[w]);
-					}
-					else if(walls_CPU[w].type == passive)
-					{
-						v_out = specular_reflect(v_in, walls_CPU[w].normal);
-					}
-					else
-					{
-						printf("Illegal wall tag");
-						exit(1);
-					}
-*/
 					tag_CPU[i * max_complex + j] = what_w_CPU[max_complex * i + j];
 					v_in = v_out;
 				}
 				v_CPU[i] = v_out;
+				print_output_file(out_file, i, w, t_tot, collision_normal);
 			}
 			else if( how_many_p_CPU[i] > 0)
 			{
 				j = what_p_CPU[max_complex * i];
 				if(i > j) particle_particle_collision(i, j);
+				print_output_file(out_file, i, j, t_tot, collision_normal);
 			}
-		}
-		for(i = 0; i < N; i++)
-		{
-			fprintf(out_file, "c, %d, %d, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf %lf\n", 
-						i, 0, t_tot, 
-						p_CPU[i].x, p_CPU[i].y, p_CPU[i].z, 
-						0.0, 0.0, 0.0,
-						v_CPU[i].x, v_CPU[i].y, v_CPU[i].z,
-						collision_normal.x, collision_normal.y, collision_normal.z, 
-						0.0, 0.0, 0.0, 0.0
-				);
 		}
 
 		if( complex_collisions_occurred ) 
 		{
-			printf("DOING THIS THING\n");
 			for(i = 0; i < complex_colliders; i++)
 			{
 				randomize_position(complex_event_particle[i]);
@@ -1210,17 +1184,8 @@ void n_body()
 	
 	
 	/*/  WRITE FINAL CONDITIONS TO FILE /*/
-	for(i = 0; i < N; i++)
-	{
-		fprintf(out_file, "c, %d, %d, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf\n", 
-					i, 0, t_tot, 
-					p_CPU[i].x, p_CPU[i].y, p_CPU[i].z, 
-					0.0, 0.0, 0.0,
-					v_CPU[i].x, v_CPU[i].y, v_CPU[i].z,
-					collision_normal.x, collision_normal.y, collision_normal.z, 
-					pressure.latest_value, gas_temperature.latest_value, heat_sum, entropy_sum // dummy for pressure
-			);
-	}
+	for(i = 0; i < N; i++) print_output_file(out_file, i, 0, t_tot, collision_normal);
+
 	fclose(out_file);
 	fclose(complex_event_log_file);
 	printf("%i gas particles, %d steps, %.4f seconds in time\n", N, step, t_tot);

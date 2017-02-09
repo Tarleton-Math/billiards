@@ -1,23 +1,22 @@
 # dimension
 3
 # number of gas particles
-500
+30
 # size of gas particles
-0.2
-# type of particle-initialization scheke (0-cube, 1-pyramid)
-0
+0.5
 # number of collision steps
 10000
-# wall type & wall temp
-1 50 50 
-1 50 50
-1 50 50
-1 50 50
-1 50 50
-1 50 50
-# switch for whether to track one large particle
-0
+# number of walls
+6
+# wall type, and temp and endpoints
+1 50 50  1.0  0.0  0.0 -4.0  0.0  0.0 
+1 50 50 -1.0  0.0  0.0  4.0  0.0  0.0
+1 50 50  0.0  1.0  0.0  0.0 -4.0  0.0 
+0 50 50  0.0 -1.0  0.0  0.0  4.0  0.0
+0 50 50  0.0  0.0  1.0  0.0  0.0 -4.0
+0 50 50  0.0  0.0 -1.0  0.0  0.0  4.0
 #output directory
 ./
 # steps per record
 200
+
