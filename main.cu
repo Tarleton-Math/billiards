@@ -8,7 +8,7 @@
 /***************************************************************
 **      STRUCTURE
 
-The main function is called n_body.  Program flow: main -> control -> n_body
+The main function is called n_body.  Program flow: main -> n_body
 
 **	TAGS
 
@@ -268,6 +268,37 @@ class Wall {
 			t = (pos.y - endpoints[0].y) / (endpoints[1].y - endpoints[0].y);
 		return (wall_temp[0] + t*(wall_temp[1] - wall_temp[0]));
 	}
+	float3 resolve_collision(int p, float3 v)
+	{
+		float3 v_out;
+		if(DIMENSION > 2)
+		{
+			if(type == heated)
+			{
+				float3 position = make_float3(0,0,0);
+				float u, sn, st1, st2, T, m;
+				T = wall_temp[0];//temperature(position);
+				m = mass_CPU[p];
+				float sigma = sqrt(BOLTZ_CONST * T / m);
+
+				u = unif_dist(generator);
+				sn = sigma * sqrt(fabs(2.0 * log(1.0 - u)));
+				st1 = norm_dist(generator)*sigma;
+				st2 = norm_dist(generator)*sigma;
+
+				v_out = sn*normal + st1*tangent1 + st2*tangent2;
+			}
+			else if(type == passive)
+			{
+				v_out = v - (2.0 * dot(normal, v) * normal);
+			}
+			else
+			{
+
+			}
+		}
+		return v_out;
+	}
 };
 Wall * walls_CPU = NULL;
 Wall * walls_GPU = NULL;
@@ -431,8 +462,6 @@ void setup_walls()
 	}
 	default_p_temp = (max_temp + min_temp) / 2.0;
 
-	cudaMalloc(&walls_GPU, num_walls*sizeof(Wall));
-	cudaMemcpy(walls_GPU, walls_CPU, num_walls*sizeof(Wall), cudaMemcpyHostToDevice);
 }
 
 
@@ -443,8 +472,9 @@ void read_input_file()
 	const int bdim = 132;
 	char buff[bdim];
 	int i, d;
-	double f, g;
+	double f, g, f1, g1,t1,t2;
 	char s[256];
+	float3 n;
 
 	if( (fp = fopen(in_fname,"r")) == NULL)
 	{
@@ -494,16 +524,26 @@ void read_input_file()
 			allocate_wall_memory();
 			for(i = 0; i < num_walls; i++)
 			{
-
+				fgets(buff, bdim, fp);
+				sscanf(buff, "%d %lf %lf %lf %lf %lf %lf",&d,&t1,&t2,&f,&g,&f1,&g1);
+				walls_CPU[i].type = d;
+				walls_CPU[i].wall_temp[0] = t1;
+				walls_CPU[i].wall_temp[1] = t2;
+				walls_CPU[i].endpoints[0].x = f;
+				walls_CPU[i].endpoints[0].y = g;
+				walls_CPU[i].endpoints[1].x = f1;
+				walls_CPU[i].endpoints[1].y = g1;
+				n.x = g1-g;
+				n.y = f-f1;
+				n.z = 0.0;
+				walls_CPU[i].normal = normalize(n);
+				make_orthonormal_frame(&(walls_CPU[i].normal), &(walls_CPU[i].tangent1), &(walls_CPU[i].tangent2));
 			}
 		}
 		else
 		{
-			printf("IN HERE!!!\n");fflush(stdout);
 			num_walls = 6;
-			printf("Don't forget your coffee. Very important\n");fflush(stdout);
 			allocate_wall_memory();
-			printf("Not allocate_wall_memory at any rate\n");fflush(stdout);
 			fgets(buff, bdim, fp);
 			for(i = 0; i < 6; i++)
 			{
@@ -512,10 +552,8 @@ void read_input_file()
 				walls_CPU[i].type = d;
 				walls_CPU[i].wall_temp[0] = f;
 				walls_CPU[i].wall_temp[1] = g;
-				printf("Wall %d has temperatures %f and %f\n", i, f, g);
 			}
 			setup_walls();
-			printf("Nor setup_walls \n");fflush(stdout);
 		}
 		fgets(buff, bdim, fp);
 		fgets(buff, bdim, fp);
@@ -533,6 +571,8 @@ void read_input_file()
 		steps_per_record = d;
 		fclose(fp);
 	}
+	cudaMalloc(&walls_GPU, num_walls*sizeof(Wall));
+	cudaMemcpy(walls_GPU, walls_CPU, num_walls*sizeof(Wall), cudaMemcpyHostToDevice);
 }
 
 // returns true if particle is inside domain, false if outside
@@ -1105,6 +1145,8 @@ void n_body()
 				for(j = 0; j < how_many_w_CPU[i]; j++)
 				{
 					w = -(1 + what_w_CPU[max_complex * i + j]);
+					v_out = walls_CPU[w].resolve_collision(i, v_in);
+/*
 					if(walls_CPU[w].type == heated)
 					{
 						v_out = heated_wall_reflection(v_in, walls_CPU[w].normal, walls_CPU[w].tangent1, walls_CPU[w].tangent2, walls_CPU[w].wall_temp[0], mass_CPU[w]);
@@ -1118,6 +1160,7 @@ void n_body()
 						printf("Illegal wall tag");
 						exit(1);
 					}
+*/
 					tag_CPU[i * max_complex + j] = what_w_CPU[max_complex * i + j];
 					v_in = v_out;
 				}

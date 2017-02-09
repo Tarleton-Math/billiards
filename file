@@ -1,9 +1,9 @@
 # dimension
 3
 # number of gas particles
-100
+500
 # size of gas particles
-0.1
+0.2
 # type of particle-initialization scheke (0-cube, 1-pyramid)
 0
 # number of collision steps
