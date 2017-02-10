@@ -37,7 +37,7 @@ But for concave walls, this is not true.  We should rethink this logic.
 
 **    HANDLING COMPLEX COLLISIONS   
 
-The logic of this program is greatly complicated by the possibiliiy of "conplex collisions" involving
+The logic of this program is greatly complicated by the possibiliiy of "complex collisions" involving
 multiple particles and/or multiple walls.  These are quite rare, but can occasionally lead to 
 catastrophic failure if not handled.  So we take great care to handle such events.  Sadly, it adds
 substantial complexity.  We describe that here.
@@ -52,7 +52,7 @@ We allow multiple simultaneous collisions of the above types at different locati
 
 However, we do not allow collisions that are more complex.  There are 2 types.
 Type III: >=2 particles and >=1 walls
-Type IV: >=3 particles
+jype IV: >=3 particles
 (a collision that meets both decriptions will be handled as type III)
 We will take care to detect more complex collisions and avoid them as follows.
 
@@ -98,6 +98,7 @@ Program handles multiple simultaneous events that are spatially separated.
 #define MIN(x, y) (x < y) ? x : y
 #define MAX(x, y) (x > y) ? x : y
 
+#define timetol 0.01
 #define hist_length 1000
 
 std :: random_device generator;
@@ -110,6 +111,7 @@ dim3 block, grid;
 int DIMENSION = 3;
 int N = 10;
 float MAX_CUBE_DIM = 4.0;
+float MIN_CUBE_DIM =-4.0;
 float surface_area;
 float vol;
 float default_radius = 0.5;
@@ -117,6 +119,7 @@ float default_mass = 2.0;
 
 //non-physical parameters
 int MAX_STEPS = 1000;
+int FILE_LINES = 1000;
 int steps_per_record = 50;
 int track_large_particle = 0;
 int ignore_particle_interaction = 0;
@@ -135,6 +138,8 @@ char dir_name[256] = "\0./";
 //dynamical variables
 float3 *p_CPU = NULL, *p_GPU = NULL; // position
 float3 *v_CPU = NULL, *v_GPU = NULL; // velocity
+float *angular_momentum = NULL;
+float *no_s_gamma = NULL;
 float *mass_CPU = NULL, *mass_GPU = NULL; // mass
 float *radius_CPU = NULL, *radius_GPU = NULL; // radius
 float *p_temp_CPU = NULL; // kinetic energy
@@ -225,12 +230,19 @@ class Wall {
 			else
 			{
 				float B1,B2,A11,A12,A21,A22,D,t1,t2;
-				B1 = p.x + r - endpoints[0].x;
-				B2 = p.y + r - endpoints[0].y;
+				float x1,y1,x2,y2;
 
-				A11 = (endpoints[1].x - endpoints[0].x);
+				x1 = endpoints[0].x + (r*normal.x);
+				y1 = endpoints[0].y + (r*normal.y);
+				x2 = endpoints[1].x + (r*normal.x);
+				y2 = endpoints[1].y + (r*normal.y);
+
+				B1 = p.x - x1;
+				B2 = p.y - y1;
+
+				A11 = (x2 - x1);
 				A12 = -v.x;
-				A21 = (endpoints[1].y - endpoints[0].y);
+				A21 = (y2 - y1);
 				A22 = -v.y;
 
 				D = A11 * A22 - (A21 * A12);
@@ -453,6 +465,7 @@ void read_input_file()
 	int i, d;
 	double f, g, h, f1, g1, h1, t1, t2;
 	char s[256];
+	double MINCD,MAXCD;
 
 	if( (fp = fopen(in_fname,"r")) == NULL)
 	{
@@ -477,6 +490,7 @@ void read_input_file()
 	}
 	else
 	{
+
 		fgets(buff,bdim,fp);
 		fgets(buff,bdim,fp);
 		sscanf(buff, "%d", &d);
@@ -509,6 +523,11 @@ void read_input_file()
 		sscanf(buff, "%d", &num_walls);
 		allocate_wall_memory();
 
+		if(DIMENSION < 3) 
+		{
+			MINCD = MAXCD = 0.0;
+		}
+
 		fgets(buff, bdim, fp);
 		for(i = 0; i < num_walls; i++)
 		{
@@ -532,6 +551,15 @@ void read_input_file()
 					walls_CPU[i].normal = normalize(make_float3((g1-g),(f-f1),0.0));
 					walls_CPU[i].tangent1 = normalize(make_float3((f-f1),(g-g1),0.0));
 					walls_CPU[i].tangent2 = make_float3(0.0,0.0,0.0);
+
+					MAXCD = MAX(MAXCD, f);
+					MAXCD = MAX(MAXCD, g);
+					MAXCD = MAX(MAXCD, f1);
+					MAXCD = MAX(MAXCD, g1);
+					MINCD = MIN(MINCD, f);
+					MINCD = MIN(MINCD, g);
+					MINCD = MIN(MINCD, f1);
+					MINCD = MIN(MINCD, g1);
 				}
 				else
 				{
@@ -560,6 +588,11 @@ void read_input_file()
 		steps_per_record = d;
 		fclose(fp);
 	}
+	if(DIMENSION < 3)
+	{
+		MIN_CUBE_DIM = MINCD;
+		MAX_CUBE_DIM = MAXCD;
+	}
 	cudaMalloc(&walls_GPU, num_walls*sizeof(Wall));
 	cudaMemcpy(walls_GPU, walls_CPU, num_walls*sizeof(Wall), cudaMemcpyHostToDevice);
 }
@@ -587,11 +620,14 @@ bool inside_domain(float3 p, float r)
 	{
 		num_total = 0;
 		float t, d = (DIMENSION > 2) ? 1.0 : 0.0;
-		float3 v = make_float3(MAX_CUBE_DIM, MAX_CUBE_DIM, d*MAX_CUBE_DIM) - p;
+		float3 v = make_float3(2, 2, 2*d);
 
-		for(int w = 0; w < num_walls; w++) num_total += walls_CPU[w].time_to_collision(p, v, r, &t);
+		for(int w = 0; w < num_walls; w++)
+		{
+			num_total += walls_CPU[w].time_to_collision(p, v, r, &t);
+		}
 	}
-	return (num_total%2 == 1);
+	return (num_total%2);
 }
 
 // find position chosen randomly in box for particle such that 
@@ -608,11 +644,11 @@ void randomize_position(int p)
 		needs_new_position = false;
 
 		// create new x, y, z coordinate for particle p
-		px = -MAX_CUBE_DIM + (2.0*MAX_CUBE_DIM) * unif_dist(generator);
-		py = -MAX_CUBE_DIM + (2.0*MAX_CUBE_DIM) * unif_dist(generator);
+		px = MIN_CUBE_DIM + (MAX_CUBE_DIM-MIN_CUBE_DIM) * unif_dist(generator);
+		py = MIN_CUBE_DIM + (MAX_CUBE_DIM-MIN_CUBE_DIM) * unif_dist(generator);
 		if(DIMENSION > 2) 
 		{
-			pz = -MAX_CUBE_DIM + (2.0*MAX_CUBE_DIM) * unif_dist(generator);
+			pz = MIN_CUBE_DIM + (2.0*MAX_CUBE_DIM) * unif_dist(generator);
 		}
 		new_pos = make_float3(px, py, pz);
 
@@ -635,6 +671,7 @@ void randomize_position(int p)
 		}
 	}
 	p_CPU[p] = new_pos;
+	printf("Looking for positions for particle %d - %lf %lf %lf\n", p,p_CPU[p].x,p_CPU[p].y,p_CPU[p].z);
 }
 
 //initialize particles with position, velcoity, radius, etc. 
@@ -652,6 +689,8 @@ void pack_particles()
 		mass_CPU[i] = default_mass;
 		radius_CPU[i] = default_radius;
 		p_temp_CPU[i] = default_p_temp;
+		no_s_gamma[i] = 1.0/sqrt(2.0);
+		angular_momentum[i] = 0.0;
 	}
 
 	if (track_large_particle)
@@ -681,6 +720,8 @@ void set_initial_conditions()
 	//CPU MEMORY ALLOCATION
 	p_CPU			= (float3*)malloc(		N * sizeof(float3) );
 	v_CPU			= (float3*)malloc(		N * sizeof(float3) );
+	angular_momentum 	= (float* )malloc(      	N * sizeof(float ) );
+	no_s_gamma          	= (float* )malloc(		N * sizeof(float ) );
 	radius_CPU		= (float* )malloc(		N * sizeof(float ) );
 	mass_CPU		= (float* )malloc(		N * sizeof(float ) );
 	dt_CPU			= (float* )malloc(		N * sizeof(float ) );
@@ -822,7 +863,7 @@ __global__ void find_dts(float3 * p, float3 * v, float * radius, float * mass,  
 			for(j = 0; j < n; j++)			
 			{
 				ok = 1;
-				if((this_particle == j) || (tag[max_complex * this_particle] == j) || (tag[max_complex * j] == this_particle) )ok = 0;
+				if((this_particle == j) || ((tag[max_complex * this_particle] == j) && (tag[max_complex * j] == this_particle)) )ok = 0;
 				if(ok > 0)
 				{
 				  	collides = particle_particle_collision(p, v, radius, this_particle, j, &dt);
@@ -933,7 +974,7 @@ float3 heated_wall_reflection(float3 v_in, float3 n, float3 t1, float3 t2, float
 	return v_out;
 }
 
-void particle_particle_collision(int i1, int i2)
+void elastic_particle_particle_collision(int i1, int i2)
 {
 	float3 n, v1_n, v1_t, v2_n, v2_t;
 	float s1_n, s2_n, m1, m2, M;
@@ -968,6 +1009,80 @@ void particle_particle_collision(int i1, int i2)
 	// update velocities
 	v_CPU[i1] = v1_t + (((m1-m2)*s1_n + (2*m2 )*s2_n)/M) * n;
 	v_CPU[i2] = v2_t + (((2*m1 )*s1_n + (m2-m1)*s2_n)/M) * n;
+}
+void no_slip_particle_particle_collision(int i1, int i2)
+{
+	float3 n,v1_n,v1_t,v2_n,v2_t,t1,t2;
+	float n1_new,n2_new,t1_new,t2_new,a1,a2,delta,l1n,l1t,l2n,l2t,m1,m2,M,s1_n,s2_n;
+
+	tag_CPU[max_complex * i1] = i2;
+	tag_CPU[max_complex * i2] = i1;
+
+	m1 = mass_CPU[i1];
+	m2 = mass_CPU[i2];
+	M = m1 + m2;
+
+	// n is the vector from center of i0 to center of i1
+	n = normalize(p_CPU[i1] - p_CPU[i2]);
+
+	//--------------------Particle 1-----------------------//
+	// get vector component of v_CPU[i0] parallel to n
+	s1_n = dot(n, v_CPU[i1]);
+	v1_n = s1_n * n;
+	// get vector component of v_CPU[i0] perpendicular to n
+	v1_t = v_CPU[i1] - v1_n;
+	// normalize that component 
+	t1 = normalize(v1_t);
+	// extract the length of the normal and tangent components of velocity
+	l1n = sqrt(dot(v1_n, v1_n));
+	l1t = sqrt(dot(v1_t, v1_t));
+	//-----------------------------------------------------//
+
+
+	//--------------------Particle 2-----------------------//
+	// get vector component of v_CPU[i1] parallel to n
+	s2_n = dot(n, v_CPU[i2]);
+	v2_n = s2_n * n;
+	// get vector component of v_CPU[i1] perpendicular to n
+	v2_t = v_CPU[i2] - v2_n;
+	// normalize that component 
+	t2 = normalize(v2_t);
+	// extract the length of the normal and tangent components of velocity
+	l2n = sqrt(dot(v2_n, v2_n));
+	l2t = sqrt(dot(v2_t, v2_t));
+	//-----------------------------------------------------//
+
+	a1 = angular_momentum[i1];
+	a2 = angular_momentum[i2];
+	delta = 2.0 / ( (1. + 1. / (no_s_gamma[i1]*no_s_gamma[i1])) / m1 + 
+			(1. + 1. / (no_s_gamma[i2]*no_s_gamma[i2])) / m2);
+
+	// angular momentum
+	angular_momentum[i1] = (1.0 - delta / (m1 * no_s_gamma[i1] * no_s_gamma[i1])) * a1 + 
+				(delta / (m1 * no_s_gamma[i1])) * l1t + 
+				(-delta / (m1 * no_s_gamma[i1] * no_s_gamma[i2])) * a2 + 
+				(-delta / (m1 * no_s_gamma[i1])) * l2t;
+	angular_momentum[i2] = (-delta / (m2 * no_s_gamma[i1] * no_s_gamma[i2])) * a1 + 
+				(delta / (m2 * no_s_gamma[i2])) * l1t + 
+				(1.0 - delta / (m2 * no_s_gamma[i2] * no_s_gamma[i2])) * a2 + 
+				(-delta / (m2 * no_s_gamma[i2])) * l2t;
+
+	// length of outgoing tangent direction velocities for each particle
+	t1_new = (delta / (m1 * no_s_gamma[i1])) * a1 + 
+		 (1.0 - delta / m1) * l1t + 
+		 (delta / (m1 * no_s_gamma[i2])) * a2 + 
+		 (delta  / m1) * l2t;
+	t2_new = (delta / (m2 * no_s_gamma[i1])) * a1 + 
+		 (delta / m2) * l1t + 
+		 (-delta / (m2 * no_s_gamma[i2])) * a2 + 
+		 (1.0 - delta  / m2) * l2t;
+
+	// length of outgoing normal direction velocities for each particle
+	n1_new = (1.0 - 2.0 * m2 / M) * l1n + (2.0 * m2 / M) * l2n;
+	n2_new = (2.0 * m1 / M) * l1n + (1.0 - 2.0 * m1 / M) * l2n;
+
+	v_CPU[i1] = t1_new * t1 + n1_new * n;
+	v_CPU[i2] = t2_new * t2 + n2_new * n;
 }
 
 
@@ -1051,27 +1166,89 @@ void check_no_particles_escape(int time_step, float total_time)
 								what_w_CPU[max_complex*i+0], 
 								what_p_CPU[max_complex*i+1]); 
 			printf("\tNew pos: (%f %f %f)\n", p_CPU[i].x, p_CPU[i].y, p_CPU[i].z);
+			fflush(stdout);
 			exit(1);
 		}
 	}
 }
 
-void print_output_file(FILE *fp, int i, int j, float time, float3 collision_normal)
+void print_output_file(FILE *fp, int i, int j, int thisstep, float time, float3 collision_normal)
 {
-	if(DIMENSION > 2)
+	int k;
+	if(thisstep < 0)
 	{
-		fprintf(fp, "c, %d, %d, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf %lf\n", 
-			i, j, time, 
-			p_CPU[i].x, p_CPU[i].y, p_CPU[i].z, 
-			0.0, 0.0, 0.0,
-			v_CPU[i].x, v_CPU[i].y, v_CPU[i].z,
-			collision_normal.x, collision_normal.y, collision_normal.z, 
-			pressure.latest_value, gas_temperature.latest_value, heat_sum, entropy_sum
-		);
+		if(DIMENSION < 3)
+		{
+			float ddt = 0.0;
+			int num = int(time/timetol);
+			num = (num > 0) ? num : 1;
+			for(int jj = 0; jj < num; jj++)
+			{
+				for(k = 0; k < N; k++) 
+				{
+					fprintf(fp, "%lf %lf %lf ", 
+							p_CPU[k].x + (ddt * v_CPU[k].x), 
+							p_CPU[k].y + (ddt * v_CPU[k].y), 
+							radius_CPU[k]);
+				}
+				fprintf(fp, "\n");
+				ddt+=timetol;
+			}
+		}
+	}
+	else if(thisstep < 1)
+	{
+		if(DIMENSION > 2)
+		{
+			fprintf(fp, "#box dimension\n box, %lf\n", MAX_CUBE_DIM);
+			fprintf(fp, "#particle radii\n");
+			for(k = 0; k < N; k++) fprintf(fp, "r, %d, %lf, %lf\n", k, radius_CPU[k], mass_CPU[k]);
+		}
+		else
+		{
+			FILE *bash_script = NULL;
+			bash_script = fopen("edge_file","w");
+			for(k = 0; k < num_walls; k++) 
+			{
+				fprintf(bash_script, "%lf %lf\n%lf %lf\n", 
+					walls_CPU[k].endpoints[0].x, 
+					walls_CPU[k].endpoints[0].y, 
+					walls_CPU[k].endpoints[1].x, 
+					walls_CPU[k].endpoints[1].y 
+					);
+			}
+			fclose(bash_script);
+
+			bash_script = fopen("plot_script","w");
+
+			fprintf(bash_script, "end_time=%d\n",j);
+
+			fprintf(bash_script, "set xrange[%lf:%lf]\nset yrange[%lf:%lf]\nunset key\n", 
+				MIN_CUBE_DIM-0.5,MAX_CUBE_DIM+0.5,MIN_CUBE_DIM-0.5,MAX_CUBE_DIM+0.5);
+
+			fprintf(bash_script, "set size square\n");
+			fprintf(bash_script, "do for [i = 1:end_time]{\n  plot 'edge_file' using 1:2 w l lc 'black', \\\n");
+			for(k = 0; k < (N-1); k++) fprintf(bash_script,"    'output.csv' using %d:%d:%d every ::i::i w circles lc %d fillstyle solid, \\\n",3*k+1,3*k+2,3*k+3,k);
+			k=(N-1);
+			fprintf(bash_script,"    'output.csv' using %d:%d:%d every ::i::i w circles lc %d fillstyle solid \n",   3*k+1,3*k+2,3*k+3,k);
+
+			fprintf(bash_script,"   pause 0.1 \n } ");
+			fclose(bash_script);
+		}
 	}
 	else
 	{
-
+		if(DIMENSION > 2)
+		{
+			fprintf(fp, "c, %d, %d, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf, %lf %lf\n", 
+				i, j, time, 
+				p_CPU[i].x, p_CPU[i].y, p_CPU[i].z, 
+				0.0, 0.0, 0.0,
+				v_CPU[i].x, v_CPU[i].y, v_CPU[i].z,
+				collision_normal.x, collision_normal.y, collision_normal.z, 
+				pressure.latest_value, gas_temperature.latest_value, heat_sum, entropy_sum
+			);
+		}
 	}
 }
 
@@ -1083,28 +1260,22 @@ void n_body()
 	char dir[256];
 
 	int i, j, step, w;
-	int smart_stop_found = 0;
 	int smart_max_steps = MAX_STEPS;
 
 	float3 v_in, v_out;
 
 	bool complex_collisions_occurred = false;
 
+	printf("Read the file\n");fflush(stdout);
 	set_initial_conditions();
+	printf("set the conditions\n");fflush(stdout);
 
 	//WRITE INITIAL CONDITION TO FILE
 	complex_event_log_file = fopen(strcat(strcpy(dir, dir_name), "complex_events_log.txt"), "w");
 	out_file = fopen(strcat(strcpy(dir, dir_name), "output.csv"), "w");
-	fprintf(out_file, "#box dimension\n box, %lf\n", MAX_CUBE_DIM);
-	fprintf(out_file, "#particle radii\n");
-	for(i = 0; i < N; i++)
-	{
-		fprintf(out_file, "r, %d, %lf, %lf\n", i, radius_CPU[i], mass_CPU[i]);
-	}
-	for(i = 0; i < N; i++) print_output_file(out_file, i, 0, t_tot, collision_normal);
+	for(i = 0; i < N; i++) print_output_file(out_file, i, smart_max_steps, i, t_tot, collision_normal);
 
 	step = 0;
-	smart_max_steps = MAX_STEPS;
 	while(step++ <= smart_max_steps)
 	{
 	  	// on GPU - find smallest time step s.t. any particle(s) collide either 
@@ -1131,6 +1302,8 @@ void n_body()
 		}
 		t_tot += dt_step;
 
+		print_output_file(out_file,i,0,-4,dt_step,collision_normal);
+
 		// update all particles to new time step
 		for(i = 0; i < N; i++)
 		{
@@ -1149,13 +1322,13 @@ void n_body()
 					v_in = v_out;
 				}
 				v_CPU[i] = v_out;
-				print_output_file(out_file, i, w, t_tot, collision_normal);
+				print_output_file(out_file, i, w, step, t_tot, collision_normal);
 			}
 			else if( how_many_p_CPU[i] > 0)
 			{
 				j = what_p_CPU[max_complex * i];
-				if(i > j) particle_particle_collision(i, j);
-				print_output_file(out_file, i, j, t_tot, collision_normal);
+				if(i > j) elastic_particle_particle_collision(i, j);
+				print_output_file(out_file, i, j, step, t_tot, collision_normal);
 			}
 		}
 
@@ -1184,7 +1357,7 @@ void n_body()
 	
 	
 	/*/  WRITE FINAL CONDITIONS TO FILE /*/
-	for(i = 0; i < N; i++) print_output_file(out_file, i, 0, t_tot, collision_normal);
+	for(i = 0; i < N; i++) print_output_file(out_file, i, 0, step, t_tot, collision_normal);
 
 	fclose(out_file);
 	fclose(complex_event_log_file);
