@@ -94,6 +94,7 @@ Program handles multiple simultaneous events that are spatially separated.
 #define heated  1
 #define sliding 2
 #define circles 3
+#define no_slip 4
 
 #define MIN(x, y) (x < y) ? x : y
 #define MAX(x, y) (x > y) ? x : y
@@ -309,6 +310,26 @@ class Wall {
 		else if(type == circles)
 		{
 
+		}
+		else if(type == no_slip)
+		{
+			float vn,vt,vn0,vt0,a, g;
+
+			g = no_s_gamma[p]; 
+			a = angular_momentum[p]; 
+
+			vn = dot(v_CPU[p], normal);
+			vt = dot(v_CPU[p], tangent1);
+
+			angular_momentum[p] 	= -((1.0-g*g)/(1.0+g*g))* a + 
+						  -(2.0*g / (1.0+g*g)) 	* vt;
+
+			vt0 = (-2.0*g/(1.0+g*g))  * a + 
+			      ((1.0-g*g)/(1.0+g*g)) * vt;
+
+			vn0 = -1.0 * vn;
+
+			v_out = vt0 * tangent1 + vn0 * normal;
 		}
 		return v_out;
 	}
@@ -681,7 +702,7 @@ void pack_particles()
 	float T;
 
 	//tag particles not to hit themselves
-	for(i = 0;  i < max_complex * N; i++) tag_CPU[i] = -N;//i / max_complex;
+	for(i = 0;  i < max_complex * N; i++) tag_CPU[i] = N;//i / max_complex;
 	
 	//set initial particle parameters
 	for (i = 0; i < N; i++)
@@ -700,9 +721,12 @@ void pack_particles()
 	}
 
 	// initialize all particles outside of the domain so we can randomize them inside. 
-	for(i = 0; i < N; i++) p_CPU[i].x = p_CPU[i].y = p_CPU[i].z = 1.5 * MAX_CUBE_DIM;
-	for(i = 0; i < N; i++) randomize_position(i);
+	//for(i = 0; i < N; i++) p_CPU[i].x = p_CPU[i].y = p_CPU[i].z = 1.5 * MAX_CUBE_DIM;
+	//for(i = 0; i < N; i++) randomize_position(i);
+	p_CPU[0] = make_float3(0.3, 0.0, 0.0);
+	v_CPU[0] = make_float3(0.0,-1.0,0.0);
 
+/*
 	for (i = 0; i < N; i++)
 	{
 		T = sqrt(BOLTZ_CONST * p_temp_CPU[i] / mass_CPU[i]);
@@ -712,6 +736,7 @@ void pack_particles()
 		if(DIMENSION > 2) v_CPU[i].z = norm_dist(generator)*T;
 		else v_CPU[i].z = 0.0;
 	}
+*/
 }
 
 
@@ -840,6 +865,7 @@ __global__ void find_dts(float3 * p, float3 * v, float * radius, float * mass,  
 {
 	float dt, current_min_dt = 0.0;
 	int j, k, ok, collides, first_collision, this_particle;
+	float3 this_p, this_v;
 
 	first_collision = 1;
 	current_min_dt = 20000000;
@@ -848,6 +874,9 @@ __global__ void find_dts(float3 * p, float3 * v, float * radius, float * mass,  
 
 	if(this_particle < n)
 	{
+		this_p = p[this_particle];
+		this_v = v[this_particle];
+
 		how_many_p[this_particle] = 0;
 		how_many_w[this_particle] = 0;
 
@@ -1010,79 +1039,79 @@ void elastic_particle_particle_collision(int i1, int i2)
 	v_CPU[i1] = v1_t + (((m1-m2)*s1_n + (2*m2 )*s2_n)/M) * n;
 	v_CPU[i2] = v2_t + (((2*m1 )*s1_n + (m2-m1)*s2_n)/M) * n;
 }
+
 void no_slip_particle_particle_collision(int i1, int i2)
 {
-	float3 n,v1_n,v1_t,v2_n,v2_t,t1,t2;
-	float n1_new,n2_new,t1_new,t2_new,a1,a2,delta,l1n,l1t,l2n,l2t,m1,m2,M,s1_n,s2_n;
+	float3 n, t;
+	float m,m1,m2,delta,vn1,vt1,vn2,vt2,a1,a2;
+	float a11,t11,n11,a22,t22,n22, g1,g2;
+
+	g1 = no_s_gamma[i1]; g2 = no_s_gamma[i2];
+	m1 = mass_CPU[i1]; m2 = mass_CPU[i2]; m = m1+m2;
+
+	a1 = angular_momentum[i1]; a2 = angular_momentum[i2];
+
+	delta = 2.0 / ( (1. + 1. / (g1*g1)) / m1 + 
+			(1. + 1. / (g2*g2)) / m2);
+
+	n = normalize(p_CPU[i1] - p_CPU[i2]);
+	t = make_float3(n.y, n.x, 0.0);
+
+	vn1 = dot(v_CPU[i1], n);
+	vt1 = dot(v_CPU[i1], t);
+	vn2 = dot(v_CPU[i2], n);
+	vt2 = dot(v_CPU[i2], t);
+
+	a11 = 	(1.0 - delta / (m1*g1*g1)) 	* a1 + 
+		(delta / (m1*g1)) 		* vt1 + 
+		0.0 				* vn1 + 
+		(-delta / (m1*g1*g2)) 		* a2 + 
+		(-delta / (m1*g1))		* vt2 + 
+		0.0 				* vn2;
+
+	t11 = 	(delta / (m1*g1))		* a1 + 
+		(1.0 - delta / m1) 		* vt1 + 
+		0.0				* vn1 + 
+		(delta / (m1*g2))		* a2 + 
+		(delta / m1)			* vt2 + 
+		0.0 				* vn2;
+
+	n11 = 	0.0 				* a1 + 
+		0.0 				* vt1 + 
+		(1.0 - 2.0*m2 / m)		* vn1 + 
+		0.0 				* a2 + 
+		0.0 				* vt2 + 
+		(2.0 * m2 / m) 			* vn2;
+
+	a22 = 	(-delta / (m2*g1*g2))	 	* a1 + 
+		(delta / (m2*g2)) 		* vt1 + 
+		0.0 				* vn1 + 
+		(1.0 - delta / (m2*g2*g2)) 	* a2 + 
+		(-delta / (m2*g2))		* vt2 + 
+		0.0 				* vn2;
+
+	t22 = 	(-delta / (m2*g1))		* a1 + 
+		(delta / m2) 			* vt1 + 
+		0.0				* vn1 + 
+		(-delta / (m2*g2))		* a2 + 
+		(1.0 - delta / m2)		* vt2 + 
+		0.0 				* vn2;
+
+	n22 = 	0.0 				* a1 + 
+		0.0 				* vt1 + 
+		(2.0*m1 / m)			* vn1 + 
+		0.0 				* a2 + 
+		0.0 				* vt2 + 
+		(1.0 - 2.0 * m1 / m) 		* vn2;
+
+	angular_momentum[i1] = a11;
+	angular_momentum[i2] = a22;
+
+	v_CPU[i1] = t11 * t + n11 * n;
+	v_CPU[i2] = t22 * t + n22 * n;
 
 	tag_CPU[max_complex * i1] = i2;
 	tag_CPU[max_complex * i2] = i1;
-
-	m1 = mass_CPU[i1];
-	m2 = mass_CPU[i2];
-	M = m1 + m2;
-
-	// n is the vector from center of i0 to center of i1
-	n = normalize(p_CPU[i1] - p_CPU[i2]);
-
-	//--------------------Particle 1-----------------------//
-	// get vector component of v_CPU[i0] parallel to n
-	s1_n = dot(n, v_CPU[i1]);
-	v1_n = s1_n * n;
-	// get vector component of v_CPU[i0] perpendicular to n
-	v1_t = v_CPU[i1] - v1_n;
-	// normalize that component 
-	t1 = normalize(v1_t);
-	// extract the length of the normal and tangent components of velocity
-	l1n = sqrt(dot(v1_n, v1_n));
-	l1t = sqrt(dot(v1_t, v1_t));
-	//-----------------------------------------------------//
-
-
-	//--------------------Particle 2-----------------------//
-	// get vector component of v_CPU[i1] parallel to n
-	s2_n = dot(n, v_CPU[i2]);
-	v2_n = s2_n * n;
-	// get vector component of v_CPU[i1] perpendicular to n
-	v2_t = v_CPU[i2] - v2_n;
-	// normalize that component 
-	t2 = normalize(v2_t);
-	// extract the length of the normal and tangent components of velocity
-	l2n = sqrt(dot(v2_n, v2_n));
-	l2t = sqrt(dot(v2_t, v2_t));
-	//-----------------------------------------------------//
-
-	a1 = angular_momentum[i1];
-	a2 = angular_momentum[i2];
-	delta = 2.0 / ( (1. + 1. / (no_s_gamma[i1]*no_s_gamma[i1])) / m1 + 
-			(1. + 1. / (no_s_gamma[i2]*no_s_gamma[i2])) / m2);
-
-	// angular momentum
-	angular_momentum[i1] = (1.0 - delta / (m1 * no_s_gamma[i1] * no_s_gamma[i1])) * a1 + 
-				(delta / (m1 * no_s_gamma[i1])) * l1t + 
-				(-delta / (m1 * no_s_gamma[i1] * no_s_gamma[i2])) * a2 + 
-				(-delta / (m1 * no_s_gamma[i1])) * l2t;
-	angular_momentum[i2] = (-delta / (m2 * no_s_gamma[i1] * no_s_gamma[i2])) * a1 + 
-				(delta / (m2 * no_s_gamma[i2])) * l1t + 
-				(1.0 - delta / (m2 * no_s_gamma[i2] * no_s_gamma[i2])) * a2 + 
-				(-delta / (m2 * no_s_gamma[i2])) * l2t;
-
-	// length of outgoing tangent direction velocities for each particle
-	t1_new = (delta / (m1 * no_s_gamma[i1])) * a1 + 
-		 (1.0 - delta / m1) * l1t + 
-		 (delta / (m1 * no_s_gamma[i2])) * a2 + 
-		 (delta  / m1) * l2t;
-	t2_new = (delta / (m2 * no_s_gamma[i1])) * a1 + 
-		 (delta / m2) * l1t + 
-		 (-delta / (m2 * no_s_gamma[i2])) * a2 + 
-		 (1.0 - delta  / m2) * l2t;
-
-	// length of outgoing normal direction velocities for each particle
-	n1_new = (1.0 - 2.0 * m2 / M) * l1n + (2.0 * m2 / M) * l2n;
-	n2_new = (2.0 * m1 / M) * l1n + (1.0 - 2.0 * m1 / M) * l2n;
-
-	v_CPU[i1] = t1_new * t1 + n1_new * n;
-	v_CPU[i2] = t2_new * t2 + n2_new * n;
 }
 
 
@@ -1179,6 +1208,12 @@ void print_output_file(FILE *fp, int i, int j, int thisstep, float time, float3 
 	{
 		if(DIMENSION < 3)
 		{
+				fprintf(fp, "%lf %lf %lf ", 
+						p_CPU[i].x, 
+						p_CPU[i].y, 
+						radius_CPU[i]);
+				fprintf(fp, "\n");
+			/*
 			float ddt = 0.0;
 			int num = int(time/timetol);
 			num = (num > 0) ? num : 1;
@@ -1194,6 +1229,7 @@ void print_output_file(FILE *fp, int i, int j, int thisstep, float time, float3 
 				fprintf(fp, "\n");
 				ddt+=timetol;
 			}
+			*/
 		}
 	}
 	else if(thisstep < 1)
@@ -1302,7 +1338,7 @@ void n_body()
 		}
 		t_tot += dt_step;
 
-		print_output_file(out_file,i,0,-4,dt_step,collision_normal);
+		print_output_file(out_file,0,0,-4,dt_step,collision_normal);
 
 		// update all particles to new time step
 		for(i = 0; i < N; i++)

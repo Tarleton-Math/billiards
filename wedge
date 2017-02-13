@@ -1,0 +1,19 @@
+# dimension
+2
+# number of gas particles
+1
+# size of gas particles
+0.1
+# number of collision steps
+100
+# number of walls
+3
+# wall type, and temp and endpoints
+4 50 50  0.0       0.0  0.0  1.73205  1.0  0.0 
+4 50 50  1.73205   1.0  0.0  1.73205 -1.0  0.0
+4 50 50  1.73205  -1.0  0.0  0.0      0.0  0.0 
+#output directory
+./
+# steps per record
+200
+
