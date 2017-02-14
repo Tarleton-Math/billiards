@@ -119,9 +119,9 @@ float default_radius = 0.5;
 float default_mass = 2.0;
 
 //non-physical parameters
+bool no_input_file = true;
 int MAX_STEPS = 1000;
 int FILE_LINES = 1000;
-int steps_per_record = 50;
 int track_large_particle = 0;
 int ignore_particle_interaction = 0;
 int all_particles_diffused = 0;
@@ -476,19 +476,190 @@ void setup_walls()
 
 }
 
+// returns true if particle is inside domain, false if outside
+bool inside_domain(float3 p, float r)
+{
+	int num_total;
+
+	if(DIMENSION > 2)
+	{
+		r*=1.5;
+		if( 	(p.x*p.x > ((MAX_CUBE_DIM-r)*(MAX_CUBE_DIM-r))) || 
+			(p.y*p.y > ((MAX_CUBE_DIM-r)*(MAX_CUBE_DIM-r))) || 
+			(p.z*p.z > ((MAX_CUBE_DIM-r)*(MAX_CUBE_DIM-r))) )
+		{
+			num_total = 2;
+		}
+		else
+		{
+			num_total = 1;
+		}
+	}
+	else
+	{
+		num_total = 0;
+		float t, d = (DIMENSION > 2) ? 1.0 : 0.0;
+		float3 v = make_float3(2, 2, 2*d);
+
+		for(int w = 0; w < num_walls; w++)
+		{
+			num_total += walls_CPU[w].time_to_collision(p, v, r, &t);
+		}
+	}
+	return (num_total%2);
+}
+
+// find position chosen randomly in box for particle such that 
+// (1) the new position is within the domain
+// (2) particle at new position is not in contact / overlapping with any other particles. 
+void randomize_position(int p, float MIN_EXTENT, float MAX_EXTENT)
+{
+	float px, py, pz, dd;
+	float3 new_pos;
+	bool needs_new_position = true;
+
+	while(needs_new_position)
+	{
+		needs_new_position = false;
+
+		// create new x, y, z coordinate for particle p
+		px = MIN_EXTENT + (MAX_EXTENT-MIN_EXTENT) * unif_dist(generator);
+		py = MIN_EXTENT + (MAX_EXTENT-MIN_EXTENT) * unif_dist(generator);
+		if(DIMENSION > 2) 
+		{
+			pz = MIN_EXTENT + (MAX_EXTENT - MIN_EXTENT) * unif_dist(generator);
+		}
+		new_pos = make_float3(px, py, pz);
+
+		// check if it is inside domain AND doesn't overlap with any other particles. 
+		if( inside_domain(new_pos, radius_CPU[p]) )
+		{
+			for(int i = 0; i < N; i++)
+			{
+				dd = dot(p_CPU[i] - new_pos, p_CPU[i] - new_pos);
+				if(dd < (radius_CPU[i] + radius_CPU[p]) * (radius_CPU[i] + radius_CPU[p]) )
+				{
+					needs_new_position = true;
+					i = N;
+				}
+			}
+		}
+		else
+		{
+			needs_new_position = true;
+		}
+	}
+	p_CPU[p] = new_pos;
+	printf("Looking for positions for particle %d - %lf %lf %lf\n", p,p_CPU[p].x,p_CPU[p].y,p_CPU[p].z);
+}
+
+
+void distribute_particles(float MIN_EXTENT, float MAX_EXTENT, int DIM)
+{
+	float T, d = (DIM > 2) ? 1.0 : 0.0;
+	int i;
+
+	//set initial particle parameters
+	for (i = 0; i < N; i++)
+	{
+		mass_CPU[i] = default_mass;
+		radius_CPU[i] = default_radius;
+		p_temp_CPU[i] = default_p_temp;
+		no_s_gamma[i] = 1.0/sqrt(2.0);
+		angular_momentum[i] = 0.0;
+	}
+
+	if (track_large_particle)
+	{
+		radius_CPU[0] = 3.0 * radius_CPU[0];
+		mass_CPU[0] = 3.0 * mass_CPU[0];
+	}
+
+	for (i = 0; i < N; i++)
+	{
+		T = sqrt(BOLTZ_CONST * p_temp_CPU[i] / mass_CPU[i]);
+		v_CPU[i].x = norm_dist(generator)*T;
+		v_CPU[i].y = norm_dist(generator)*T;
+		if(DIMENSION > 2) v_CPU[i].z = norm_dist(generator)*T;
+		else v_CPU[i].z = 0.0;
+	}
+
+	for(i = 0; i < N; i++) p_CPU[i] = 2.0 * MAX_EXTENT * make_float3(1.0, 1.0, d);
+	for(i = 0; i < N; i++) randomize_position(i, MIN_EXTENT, MAX_EXTENT);
+}
+
+void allocate_CPU_memory()
+{
+	p_CPU			= (float3*)malloc(		N * sizeof(float3) );
+	v_CPU			= (float3*)malloc(		N * sizeof(float3) );
+	angular_momentum 	= (float* )malloc(      	N * sizeof(float ) );
+	no_s_gamma          	= (float* )malloc(		N * sizeof(float ) );
+	radius_CPU		= (float* )malloc(		N * sizeof(float ) );
+	mass_CPU		= (float* )malloc(		N * sizeof(float ) );
+	dt_CPU			= (float* )malloc(		N * sizeof(float ) );
+	p_temp_CPU		= (float* )malloc(		N * sizeof(float ) );
+	tag_CPU			= (int*   )malloc(max_complex *	N * sizeof(int   ) );
+	how_many_p_CPU 		= (int*   )malloc(		N * sizeof(int   ) );
+	how_many_w_CPU 		= (int*   )malloc(		N * sizeof(int   ) );
+	what_p_CPU		= (int*   )malloc(max_complex *	N * sizeof(int   ) );
+	what_w_CPU		= (int*   )malloc(max_complex *	N * sizeof(int   ) );
+	complex_event_particle 	= (int*   )malloc(		N * sizeof(int   ) );
+	complex_event_log 	= (int*   )malloc(2 *		N * sizeof(int   ) );
+
+	//tag particles not to hit themselves
+	for(int i = 0; i < max_complex * N; i++) tag_CPU[i] = N + 2;
+}
+
+void allocate_GPU_memory()
+{
+
+	// GPU MEMORY ALLOCATION
+	block.x = 1024;
+	block.y = 1;
+	block.z = 1;
+
+	grid.x = (N - 1) / block.x + 1;
+	grid.y = 1;
+	grid.z = 1;
+
+	cudaMalloc( (void**)&p_GPU,       N *sizeof(float3) );
+	cudaMalloc( (void**)&v_GPU,       N *sizeof(float3) );
+	cudaMalloc( (void**)&radius_GPU,  N *sizeof(float ) );
+	cudaMalloc( (void**)&mass_GPU,    N *sizeof(float ) );
+
+	cudaMalloc( (void**)&tag_GPU,	  max_complex * N *sizeof(int  ) );
+	cudaMalloc( (void**)&dt_GPU,			N *sizeof(float) );
+	cudaMalloc( (void**)&how_many_p_GPU,		N *sizeof(int  ) );
+	cudaMalloc( (void**)&how_many_w_GPU,		N *sizeof(int  ) );
+	cudaMalloc( (void**)&what_p_GPU,  max_complex * N *sizeof(int  ) );
+	cudaMalloc( (void**)&what_w_GPU,  max_complex * N *sizeof(int  ) );
+
+	cudaMalloc(&walls_GPU, num_walls*sizeof(Wall));
+
+	// copy CPU initialization to GPU
+	cudaMemcpy( p_GPU,      p_CPU,                  N *sizeof(float3), cudaMemcpyHostToDevice );
+	cudaMemcpy( v_GPU,      v_CPU,                  N *sizeof(float3), cudaMemcpyHostToDevice );
+	cudaMemcpy( mass_GPU,   mass_CPU,               N *sizeof(float ), cudaMemcpyHostToDevice );
+	cudaMemcpy( radius_GPU, radius_CPU,             N *sizeof(float ), cudaMemcpyHostToDevice );
+	cudaMemcpy( tag_GPU,    tag_CPU,  max_complex * N *sizeof(int   ), cudaMemcpyHostToDevice );
+
+	cudaMemcpy(walls_GPU, walls_CPU, num_walls*sizeof(Wall), cudaMemcpyHostToDevice);
+}
+
 
 // reads input file of parameters (temperature of walls, particle size, &c)
-void read_input_file()
+void read_input_file_and_set_initial_conditions()
 {
   	FILE * fp = NULL;
 	const int bdim = 132;
 	char buff[bdim];
-	int i, d;
-	double f, g, h, f1, g1, h1, t1, t2;
+	int i, d, dim, n;
+	double f, g, h, f1, g1, h1, t1, t2, v1, v2, v3;
 	char s[256];
 	double MINCD,MAXCD;
+	bool particle_initialization_by_file = false;
 
-	if( (fp = fopen(in_fname,"r")) == NULL)
+	if(no_input_file)
 	{
 		printf("No input file. Using default values.\n");
 		num_walls = 6;
@@ -507,47 +678,44 @@ void read_input_file()
 			make_orthonormal_frame(&(walls_CPU[i].normal), &(walls_CPU[i].tangent1), &(walls_CPU[i].tangent2));
 			walls_CPU[i].position = -MAX_CUBE_DIM * (walls_CPU[i].normal);
 		}
-
+		allocate_CPU_memory();
+		distribute_particles(MIN_CUBE_DIM, MAX_CUBE_DIM, DIMENSION);
+		allocate_GPU_memory();
 	}
 	else
 	{
+		fp = fopen(in_fname,"r");
 
 		fgets(buff,bdim,fp);
 		fgets(buff,bdim,fp);
-		sscanf(buff, "%d", &d);
-		DIMENSION = d;
+		//sscanf(buff, "%d", &dim); DIMENSION = dim;
+		sscanf(buff, "%d", &DIMENSION);
 
 		fgets(buff, bdim, fp);
 		fgets(buff, bdim, fp);
-		sscanf(buff, "%d", &d);
-		N = d;
+		//sscanf(buff, "%d", &n);
+		//N = n;
+		sscanf(buff, "%d", &N);
+		allocate_CPU_memory();
 
 		fgets(buff, bdim, fp);
 		fgets(buff, bdim, fp);
-		sscanf(buff, "%lf", &f);
-		default_radius = f;
-		if(default_radius > 0)
-		{
-		}
-		else
-		{
-			ignore_particle_interaction = true;
-		}
+		//sscanf(buff, "%lf", &f); default_radius = f;
+		sscanf(buff, "%f", &default_radius);
+		if(default_radius > 0){ }
+		else { ignore_particle_interaction = true; }
 
 		fgets(buff,bdim,fp);
 		fgets(buff,bdim,fp);
-		sscanf(buff, "%d", &d);
-		MAX_STEPS = d;
+		//sscanf(buff, "%d", &d); MAX_STEPS = d;
+		sscanf(buff, "%d", &MAX_STEPS);
 
 		fgets(buff, bdim, fp);
 		fgets(buff, bdim, fp);
 		sscanf(buff, "%d", &num_walls);
 		allocate_wall_memory();
 
-		if(DIMENSION < 3) 
-		{
-			MINCD = MAXCD = 0.0;
-		}
+		if(DIMENSION < 3) MINCD = MAXCD = 0.0;
 
 		fgets(buff, bdim, fp);
 		for(i = 0; i < num_walls; i++)
@@ -589,6 +757,20 @@ void read_input_file()
 					make_orthonormal_frame(&(walls_CPU[i].normal), 
 								&(walls_CPU[i].tangent1), 
 								&(walls_CPU[i].tangent2));
+
+					MINCD = MIN(MINCD, f);
+					MINCD = MIN(MINCD, g);
+					MINCD = MIN(MINCD, h);
+					MINCD = MIN(MINCD, f1);
+					MINCD = MIN(MINCD, g1);
+					MINCD = MIN(MINCD, h1);
+
+					MAXCD = MAX(MAXCD, f);
+					MAXCD = MAX(MAXCD, g);
+					MAXCD = MAX(MAXCD, h);
+					MAXCD = MAX(MAXCD, f1);
+					MAXCD = MAX(MAXCD, g1);
+					MAXCD = MAX(MAXCD, h1);
 				}
 			}
 			else
@@ -600,198 +782,38 @@ void read_input_file()
 
 		fgets(buff, bdim, fp);
 		fgets(buff, bdim, fp);
-		sscanf(buff, "%s", s);
-		strcpy(dir_name, s);
-
-		fgets(buff, bdim, fp);
-		fgets(buff, bdim, fp);
-		sscanf(buff, "%d", &d);
-		steps_per_record = d;
-		fclose(fp);
-	}
-	if(DIMENSION < 3)
-	{
-		MIN_CUBE_DIM = MINCD;
-		MAX_CUBE_DIM = MAXCD;
-	}
-	cudaMalloc(&walls_GPU, num_walls*sizeof(Wall));
-	cudaMemcpy(walls_GPU, walls_CPU, num_walls*sizeof(Wall), cudaMemcpyHostToDevice);
-}
-
-// returns true if particle is inside domain, false if outside
-bool inside_domain(float3 p, float r)
-{
-	int num_total;
-
-	if(DIMENSION > 2)
-	{
-		r*=1.5;
-		if( 	(p.x*p.x > ((MAX_CUBE_DIM-r)*(MAX_CUBE_DIM-r))) || 
-			(p.y*p.y > ((MAX_CUBE_DIM-r)*(MAX_CUBE_DIM-r))) || 
-			(p.z*p.z > ((MAX_CUBE_DIM-r)*(MAX_CUBE_DIM-r))) )
+		sscanf(buff, "%d", &particle_initialization_by_file);
+		if(particle_initialization_by_file)
 		{
-			num_total = 2;
-		}
-		else
-		{
-			num_total = 1;
-		}
-	}
-	else
-	{
-		num_total = 0;
-		float t, d = (DIMENSION > 2) ? 1.0 : 0.0;
-		float3 v = make_float3(2, 2, 2*d);
-
-		for(int w = 0; w < num_walls; w++)
-		{
-			num_total += walls_CPU[w].time_to_collision(p, v, r, &t);
-		}
-	}
-	return (num_total%2);
-}
-
-// find position chosen randomly in box for particle such that 
-// (1) the new position is within the domain
-// (2) particle at new position is not in contact / overlapping with any other particles. 
-void randomize_position(int p)
-{
-	float px, py, pz, dd;
-	float3 new_pos;
-	bool needs_new_position = true;
-
-	while(needs_new_position)
-	{
-		needs_new_position = false;
-
-		// create new x, y, z coordinate for particle p
-		px = MIN_CUBE_DIM + (MAX_CUBE_DIM-MIN_CUBE_DIM) * unif_dist(generator);
-		py = MIN_CUBE_DIM + (MAX_CUBE_DIM-MIN_CUBE_DIM) * unif_dist(generator);
-		if(DIMENSION > 2) 
-		{
-			pz = MIN_CUBE_DIM + (2.0*MAX_CUBE_DIM) * unif_dist(generator);
-		}
-		new_pos = make_float3(px, py, pz);
-
-		// check if it is inside domain AND doesn't overlap with any other particles. 
-		if( inside_domain(new_pos, radius_CPU[p]) )
-		{
-			for(int i = 0; i < N; i++)
+			for(i = 0; i < N; i++)
 			{
-				dd = dot(p_CPU[i] - new_pos, p_CPU[i] - new_pos);
-				if(dd < (radius_CPU[i] + radius_CPU[p]) * (radius_CPU[i] + radius_CPU[p]) )
-				{
-					needs_new_position = true;
-					i = N;
-				}
+				fgets(buff, bdim, fp);
+				sscanf(buff, "%lf %lf %lf %lf %lf %lf %lf %lf %lf %lf", 
+				&f1, &t1, &f, &g, &h, &g1, &h1, &v1, &v2, &v3);
+
+				angular_momentum[i] = f1;
+				no_s_gamma[i] = t1;
+				radius_CPU[i] = g1;
+				mass_CPU[i] = h1;
+				p_CPU[i] = make_float3(f, g, h);
+				v_CPU[i] = make_float3(v1, v2, v3);
 			}
 		}
 		else
 		{
-			needs_new_position = true;
+			distribute_particles(MINCD, MAXCD, DIMENSION);
 		}
+		allocate_GPU_memory();
+
+		fgets(buff, bdim, fp);
+		fgets(buff, bdim, fp);
+		sscanf(buff, "%s", s);
+		strcpy(dir_name, s);
+
+		MIN_CUBE_DIM = MINCD;
+		MAX_CUBE_DIM = MAXCD;
 	}
-	p_CPU[p] = new_pos;
-	printf("Looking for positions for particle %d - %lf %lf %lf\n", p,p_CPU[p].x,p_CPU[p].y,p_CPU[p].z);
 }
-
-//initialize particles with position, velcoity, radius, etc. 
-void pack_particles()
-{
-	int i;
-	float T;
-
-	//tag particles not to hit themselves
-	for(i = 0;  i < max_complex * N; i++) tag_CPU[i] = N;//i / max_complex;
-	
-	//set initial particle parameters
-	for (i = 0; i < N; i++)
-	{
-		mass_CPU[i] = default_mass;
-		radius_CPU[i] = default_radius;
-		p_temp_CPU[i] = default_p_temp;
-		no_s_gamma[i] = 1.0/sqrt(2.0);
-		angular_momentum[i] = 0.0;
-	}
-
-	if (track_large_particle)
-	{
-		radius_CPU[0] = 3.0 * radius_CPU[0];
-		mass_CPU[0] = 3.0 * mass_CPU[0];
-	}
-
-	// initialize all particles outside of the domain so we can randomize them inside. 
-	//for(i = 0; i < N; i++) p_CPU[i].x = p_CPU[i].y = p_CPU[i].z = 1.5 * MAX_CUBE_DIM;
-	//for(i = 0; i < N; i++) randomize_position(i);
-	p_CPU[0] = make_float3(0.3, 0.0, 0.0);
-	v_CPU[0] = make_float3(0.0,-1.0,0.0);
-
-/*
-	for (i = 0; i < N; i++)
-	{
-		T = sqrt(BOLTZ_CONST * p_temp_CPU[i] / mass_CPU[i]);
-
-		v_CPU[i].x = norm_dist(generator)*T;
-		v_CPU[i].y = norm_dist(generator)*T;
-		if(DIMENSION > 2) v_CPU[i].z = norm_dist(generator)*T;
-		else v_CPU[i].z = 0.0;
-	}
-*/
-}
-
-
-void set_initial_conditions()
-{
-	//CPU MEMORY ALLOCATION
-	p_CPU			= (float3*)malloc(		N * sizeof(float3) );
-	v_CPU			= (float3*)malloc(		N * sizeof(float3) );
-	angular_momentum 	= (float* )malloc(      	N * sizeof(float ) );
-	no_s_gamma          	= (float* )malloc(		N * sizeof(float ) );
-	radius_CPU		= (float* )malloc(		N * sizeof(float ) );
-	mass_CPU		= (float* )malloc(		N * sizeof(float ) );
-	dt_CPU			= (float* )malloc(		N * sizeof(float ) );
-	p_temp_CPU		= (float* )malloc(		N * sizeof(float ) );
-	tag_CPU			= (int*   )malloc(max_complex *	N * sizeof(int   ) );
-	how_many_p_CPU 		= (int*   )malloc(		N * sizeof(int   ) );
-	how_many_w_CPU 		= (int*   )malloc(		N * sizeof(int   ) );
-	what_p_CPU		= (int*   )malloc(max_complex *	N * sizeof(int   ) );
-	what_w_CPU		= (int*   )malloc(max_complex *	N * sizeof(int   ) );
-	complex_event_particle 	= (int*   )malloc(		N * sizeof(int   ) );
-	complex_event_log 	= (int*   )malloc(2 *		N * sizeof(int   ) );
-
-	// GPU MEMORY ALLOCATION
-	block.x = 1024;
-	block.y = 1;
-	block.z = 1;
-
-	grid.x = (N - 1) / block.x + 1;
-	grid.y = 1;
-	grid.z = 1;
-
-	cudaMalloc( (void**)&p_GPU,       N *sizeof(float3) );
-	cudaMalloc( (void**)&v_GPU,       N *sizeof(float3) );
-	cudaMalloc( (void**)&radius_GPU,  N *sizeof(float ) );
-	cudaMalloc( (void**)&mass_GPU,    N *sizeof(float ) );
-
-	cudaMalloc( (void**)&tag_GPU,	  max_complex * N *sizeof(int  ) );
-	cudaMalloc( (void**)&dt_GPU,			N *sizeof(float) );
-	cudaMalloc( (void**)&how_many_p_GPU,		N *sizeof(int  ) );
-	cudaMalloc( (void**)&how_many_w_GPU,		N *sizeof(int  ) );
-	cudaMalloc( (void**)&what_p_GPU,  max_complex * N *sizeof(int  ) );
-	cudaMalloc( (void**)&what_w_GPU,  max_complex * N *sizeof(int  ) );
-
-	// set up particle parameters
-	pack_particles();
-
-	// copy CPU initialization to GPU
-	cudaMemcpy( p_GPU,      p_CPU,                  N *sizeof(float3), cudaMemcpyHostToDevice );
-	cudaMemcpy( v_GPU,      v_CPU,                  N *sizeof(float3), cudaMemcpyHostToDevice );
-	cudaMemcpy( mass_GPU,   mass_CPU,               N *sizeof(float ), cudaMemcpyHostToDevice );
-	cudaMemcpy( radius_GPU, radius_CPU,             N *sizeof(float ), cudaMemcpyHostToDevice );
-	cudaMemcpy( tag_GPU,    tag_CPU,  max_complex * N *sizeof(int   ), cudaMemcpyHostToDevice );
-
-}
-
 
 
 float get_intersection_point(float time, int p)
@@ -1302,9 +1324,6 @@ void n_body()
 
 	bool complex_collisions_occurred = false;
 
-	printf("Read the file\n");fflush(stdout);
-	set_initial_conditions();
-	printf("set the conditions\n");fflush(stdout);
 
 	//WRITE INITIAL CONDITION TO FILE
 	complex_event_log_file = fopen(strcat(strcpy(dir, dir_name), "complex_events_log.txt"), "w");
@@ -1372,7 +1391,7 @@ void n_body()
 		{
 			for(i = 0; i < complex_colliders; i++)
 			{
-				randomize_position(complex_event_particle[i]);
+				randomize_position(complex_event_particle[i], MIN_CUBE_DIM, MAX_CUBE_DIM);
 				fprintf(complex_event_log_file, "%d, ", complex_event_log[i]);
 			}
 			fprintf(complex_event_log_file, "\n");
@@ -1410,14 +1429,18 @@ int main(int argc, char** argv)
 	if(--argc < 1)
 	{
 		printf("Without input file, reverting to default parameters\n");
+		no_input_file = true;
 	}
 	else
 	{
 		in_fname = argv[1];
+		no_input_file = false;
 	}
 
 	time_0 = clock();
-	read_input_file();
+
+	read_input_file_and_set_initial_conditions();
+
     	n_body();
 	time_1 = clock();
 
