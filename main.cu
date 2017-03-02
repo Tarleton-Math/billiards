@@ -95,6 +95,7 @@ Program handles multiple simultaneous events that are spatially separated.
 #define sliding 2
 #define circles 3
 #define no_slip 4
+#define end 5
 
 #define MIN(x, y) (x < y) ? x : y
 #define MAX(x, y) (x > y) ? x : y
@@ -124,9 +125,9 @@ int MAX_STEPS = 1000;
 int FILE_LINES = 1000;
 int track_large_particle = 0;
 int ignore_particle_interaction = 0;
+bool no_slip_particle = true;
 int all_particles_diffused = 0;
 int diff_number = 2;
-int packing_scheme = 0;
 
 //physical constants
 float BOLTZ_CONST = 1.0; //1.38064852e-23;
@@ -525,6 +526,7 @@ void randomize_position(int p, float MIN_EXTENT, float MAX_EXTENT)
 		// create new x, y, z coordinate for particle p
 		px = MIN_EXTENT + (MAX_EXTENT-MIN_EXTENT) * unif_dist(generator);
 		py = MIN_EXTENT + (MAX_EXTENT-MIN_EXTENT) * unif_dist(generator);
+		pz = 0.0;
 		if(DIMENSION > 2) 
 		{
 			pz = MIN_EXTENT + (MAX_EXTENT - MIN_EXTENT) * unif_dist(generator);
@@ -779,6 +781,11 @@ void read_input_file_and_set_initial_conditions()
 				walls_CPU[i].radius = f1;
 			}
 		}
+
+		fgets(buff, bdim, fp);
+		fgets(buff, bdim, fp);
+		sscanf(buff, "%d", &d);
+		no_slip_particle = (d > 0) ? true : false;
 
 		fgets(buff, bdim, fp);
 		fgets(buff, bdim, fp);
@@ -1230,11 +1237,8 @@ void print_output_file(FILE *fp, int i, int j, int thisstep, float time, float3 
 	{
 		if(DIMENSION < 3)
 		{
-				fprintf(fp, "%lf %lf %lf ", 
-						p_CPU[i].x, 
-						p_CPU[i].y, 
-						radius_CPU[i]);
-				fprintf(fp, "\n");
+			for(int jj = 0; jj < N; jj++) fprintf(fp, "%lf %lf %lf ", p_CPU[jj].x, p_CPU[jj].y, radius_CPU[jj]);
+				fprintf(fp, "%lf\n", time);
 			/*
 			float ddt = 0.0;
 			int num = int(time/timetol);
@@ -1281,6 +1285,8 @@ void print_output_file(FILE *fp, int i, int j, int thisstep, float time, float3 
 
 			fprintf(bash_script, "end_time=%d\n",j);
 
+			//fprintf(bash_script, "set xrange[%lf:%lf]\nset yrange[%lf:%lf]\nunset key\n", 
+			//	-0.5,MAX_CUBE_DIM+0.5,MIN_CUBE_DIM-0.5,MAX_CUBE_DIM+0.5);
 			fprintf(bash_script, "set xrange[%lf:%lf]\nset yrange[%lf:%lf]\nunset key\n", 
 				MIN_CUBE_DIM-0.5,MAX_CUBE_DIM+0.5,MIN_CUBE_DIM-0.5,MAX_CUBE_DIM+0.5);
 
@@ -1288,6 +1294,7 @@ void print_output_file(FILE *fp, int i, int j, int thisstep, float time, float3 
 			fprintf(bash_script, "do for [i = 1:end_time]{\n  plot 'edge_file' using 1:2 w l lc 'black', \\\n");
 			for(k = 0; k < (N-1); k++) fprintf(bash_script,"    'output.csv' using %d:%d:%d every ::i::i w circles lc %d fillstyle solid, \\\n",3*k+1,3*k+2,3*k+3,k);
 			k=(N-1);
+			//fprintf(bash_script,"    'output.csv' using %d:%d:%d every ::::i w lines lc %d \n",   3*k+1,3*k+2,3*k+3,k);
 			fprintf(bash_script,"    'output.csv' using %d:%d:%d every ::i::i w circles lc %d fillstyle solid \n",   3*k+1,3*k+2,3*k+3,k);
 
 			fprintf(bash_script,"   pause 0.1 \n } ");
@@ -1357,7 +1364,7 @@ void n_body()
 		}
 		t_tot += dt_step;
 
-		print_output_file(out_file,0,0,-4,dt_step,collision_normal);
+		print_output_file(out_file,0,0,-4,t_tot,collision_normal);
 
 		// update all particles to new time step
 		for(i = 0; i < N; i++)
@@ -1372,6 +1379,15 @@ void n_body()
 				for(j = 0; j < how_many_w_CPU[i]; j++)
 				{
 					w = -(1 + what_w_CPU[max_complex * i + j]);
+					//end
+					if(walls_CPU[w].type == end)
+					{
+						printf("step %d particle %d escaped through end wall\n", step, i);
+						step = smart_max_steps + 2;
+						i = N;
+						j = num_walls;
+						break;
+					}
 					v_out = walls_CPU[w].resolve_collision(i, v_in);
 					tag_CPU[i * max_complex + j] = what_w_CPU[max_complex * i + j];
 					v_in = v_out;
@@ -1382,7 +1398,11 @@ void n_body()
 			else if( how_many_p_CPU[i] > 0)
 			{
 				j = what_p_CPU[max_complex * i];
-				if(i > j) elastic_particle_particle_collision(i, j);
+				if(i > j) 
+				{
+					if(no_slip_particle) no_slip_particle_particle_collision(i,j);
+					else elastic_particle_particle_collision(i, j);
+				}
 				print_output_file(out_file, i, j, step, t_tot, collision_normal);
 			}
 		}
